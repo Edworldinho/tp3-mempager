@@ -35,6 +35,7 @@ typedef struct {
     int referenced;     /* Bit de referência para segunda chance */
     int dirty;          /* Página modificada? */
     int initialized;    /* Já foi zerada? */
+    int saved_on_disk;  /* 1 se o bloco de disco tem dados válidos */
 } page_entry_t;
 
 /* Tabela de páginas de um processo */
@@ -44,7 +45,6 @@ typedef struct process_table {
     int page_count;             /* Número de páginas alocadas */
     struct process_table *next; /* Para lista encadeada */
 } process_table_t;
-
 
 /* Entrada na tabela de quadros físicos */
 typedef struct {
@@ -150,34 +150,45 @@ static int select_victim_frame() {
             if (proc && frame->page_index < proc->page_count) {
                 page_entry_t *page = &proc->pages[frame->page_index];
 
-                if (frame->referenced || page->referenced) {
-                    frame->referenced = 0;
-                    page->referenced = 0;
-
-                    if (page->state == PAGE_IN_MEMORY && page->prot != PROT_NONE) {
-                        void *vaddr = (void *)(UVM_BASEADDR +
-                                               frame->page_index * sysconf(_SC_PAGESIZE));
-                        /* Remove permissões para implementar segunda chance */
-                        mmu_chprot(proc->pid, vaddr, PROT_NONE);
-                        page->prot = PROT_NONE;
+                /* Só processa se a página está na memória */
+                if (page->state == PAGE_IN_MEMORY) {
+                    if (frame->referenced || page->referenced) {
+                        /* Dá segunda chance: marca como não referenciada */
+                        frame->referenced = 0;
+                        page->referenced = 0;
+                        
+                        /* Se não está em PROT_NONE, coloca em PROT_NONE */
+                        if (page->prot != PROT_NONE) {
+                            void *vaddr = (void *)(UVM_BASEADDR +
+                                                   frame->page_index * sysconf(_SC_PAGESIZE));
+                            mmu_chprot(proc->pid, vaddr, PROT_NONE);
+                            page->prot = PROT_NONE;
+                        }
+                    } else {
+                        /* Encontrou vítima! */
+                        int victim = pager.clock_hand;
+                        pager.clock_hand = (pager.clock_hand + 1) % pager.nframes;
+                        return victim;
                     }
-                } else {
-                    int victim = pager.clock_hand;
-                    pager.clock_hand = (pager.clock_hand + 1) % pager.nframes;
-                    return victim;
                 }
             }
         }
 
         pager.clock_hand = (pager.clock_hand + 1) % pager.nframes;
+        
+        /* Se deu uma volta completa e não encontrou vítima */
         if (pager.clock_hand == start) {
-            /* fallback defensivo */
-            return pager.clock_hand;
+            /* Neste caso, todas as páginas já foram marcadas como PROT_NONE
+               na passagem anterior. Agora escolhe a próxima como vítima. */
+            int victim = pager.clock_hand;
+            pager.clock_hand = (pager.clock_hand + 1) % pager.nframes;
+            return victim;
         }
     }
 }
 
 static void evict_page(int frame) {
+
     frame_entry_t *f = &pager.frames[frame];
     if (f->free) return;
 
@@ -188,28 +199,33 @@ static void evict_page(int frame) {
     }
 
     page_entry_t *page = &proc->pages[f->page_index];
+    
+    void *vaddr = (void *)(UVM_BASEADDR + f->page_index * sysconf(_SC_PAGESIZE));
+    
+    mmu_nonresident(f->pid, vaddr);
 
-    /* Se já foi inicializada, salvar o conteúdo atual */
-    if (page->initialized) {
+    /* Salva no disco apenas se a página estiver suja */
+    if (page->dirty) {
         mmu_disk_write(frame, page->disk_block);
         page->dirty = 0;
+        page->saved_on_disk = 1;  /* Disco tem dados válidos */
+    } else {
+        /* Se não está suja, não há dados válidos no disco */
+        page->saved_on_disk = 0;
     }
 
     page->state = PAGE_ON_DISK;
-    page->prot = PROT_NONE;
-
-    void *vaddr = (void *)(UVM_BASEADDR + f->page_index * sysconf(_SC_PAGESIZE));
-    mmu_nonresident(f->pid, vaddr);
+    /* NÃO chama mmu_chprot aqui - já foi feito em select_victim_frame se necessário */
 
     f->free = 1;
     f->referenced = 0;
 }
 
-
 /* Traz uma página para a memória */
 static void load_page(process_table_t *proc, int page_idx, int frame) {
     page_entry_t *page = &proc->pages[page_idx];
     frame_entry_t *f = &pager.frames[frame];
+    page_state_t old_state = page->state;  /* Guarda estado anterior */
 
     f->free = 0;
     f->pid = proc->pid;
@@ -222,20 +238,29 @@ static void load_page(process_table_t *proc, int page_idx, int frame) {
 
     void *vaddr = (void *)(UVM_BASEADDR + page_idx * sysconf(_SC_PAGESIZE));
 
-    if (!page->initialized) {
+    if (old_state == PAGE_UNINITIALIZED) {
         mmu_zero_fill(frame);
         page->initialized = 1;
+        page->saved_on_disk = 0;  /* Disco não tem dados válidos */
         page->dirty = 0;
-    } else {
-        mmu_disk_read(page->disk_block, frame);
-        page->dirty = 0;
+    } else if (old_state == PAGE_ON_DISK) {
+        if (page->saved_on_disk) {
+            mmu_disk_read(page->disk_block, frame);
+            page->dirty = 0;
+            /* Mantém initialized=1 e saved_on_disk=1 */
+        } else {
+            mmu_zero_fill(frame);
+            page->initialized = 1;
+            page->saved_on_disk = 0;
+            page->dirty = 0;
+        }
     }
+    /* Se já estava PAGE_IN_MEMORY, não faz nada */
 
     /* Sempre começa como somente leitura */
     mmu_resident(proc->pid, vaddr, frame, PROT_READ);
     page->prot = PROT_READ;
 }
-
 
 /* ==================== FUNÇÕES PÚBLICAS ==================== */
 
@@ -318,6 +343,7 @@ void *pager_extend(pid_t pid) {
     page->referenced = 0;
     page->dirty = 0;
     page->initialized = 0;
+    page->saved_on_disk = 0;  /* Nova flag: inicialmente disco não tem dados válidos */
 
     /* Calcula endereço virtual */
     void *vaddr = (void *)(UVM_BASEADDR + proc->page_count * sysconf(_SC_PAGESIZE));
@@ -358,7 +384,7 @@ void pager_fault(pid_t pid, void *addr) {
         } else if (page->prot == PROT_READ) {
             /* Falta por escrita em página só leitura */
             page->prot = PROT_READ | PROT_WRITE;
-            page->dirty = 1;
+            page->dirty = 1;  /* MARCADA COMO SUJA! */
             mmu_chprot(pid, page_vaddr, page->prot);
         }
 
@@ -377,7 +403,6 @@ void pager_fault(pid_t pid, void *addr) {
 
     pthread_mutex_unlock(&pager.mutex);
 }
-
 
 int pager_syslog(pid_t pid, void *addr, size_t len) {
     pthread_mutex_lock(&pager.mutex);
@@ -432,11 +457,22 @@ int pager_syslog(pid_t pid, void *addr, size_t len) {
             void *vaddr = (void *)(UVM_BASEADDR +
                                    (intptr_t)page_idx * pagesize);
 
-            if (!page->initialized) {
+            /* Usar a mesma lógica de load_page */
+            if (page->state == PAGE_UNINITIALIZED) {
                 mmu_zero_fill(frame);
                 page->initialized = 1;
-            } else {
-                mmu_disk_read(page->disk_block, frame);
+                page->saved_on_disk = 0;
+                page->dirty = 0;
+            } else if (page->state == PAGE_ON_DISK) {
+                if (page->saved_on_disk) {
+                    mmu_disk_read(page->disk_block, frame);
+                    page->dirty = 0;
+                } else {
+                    mmu_zero_fill(frame);
+                    page->initialized = 1;
+                    page->saved_on_disk = 0;
+                    page->dirty = 0;
+                }
             }
 
             /* Mapeia como somente leitura para syslog */
@@ -454,13 +490,11 @@ int pager_syslog(pid_t pid, void *addr, size_t len) {
         printf("%02x", (unsigned)byte);
     }
 
-    /* Se os testes reclamarem de formato, podemos ajustar o \n aqui */
     printf("\n");
 
     pthread_mutex_unlock(&pager.mutex);
     return 0;
 }
-
 
 void pager_destroy(pid_t pid) {
     pthread_mutex_lock(&pager.mutex);
