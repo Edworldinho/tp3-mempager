@@ -38,12 +38,13 @@ typedef struct {
 } page_entry_t;
 
 /* Tabela de páginas de um processo */
-typedef struct {
+typedef struct process_table {
     pid_t pid;
     page_entry_t *pages;        /* Array de páginas virtuais */
     int page_count;             /* Número de páginas alocadas */
     struct process_table *next; /* Para lista encadeada */
 } process_table_t;
+
 
 /* Entrada na tabela de quadros físicos */
 typedef struct {
@@ -97,7 +98,6 @@ static process_table_t* create_process_table(pid_t pid) {
 static void destroy_process_table(process_table_t *proc) {
     if (!proc) return;
 
-    /* Remove da lista */
     process_table_t **prev = &pager.processes;
     while (*prev && *prev != proc) {
         prev = &(*prev)->next;
@@ -397,7 +397,6 @@ void pager_fault(pid_t pid, void *addr) {
 
     pthread_mutex_unlock(&pager.mutex);
 }
-
 int pager_syslog(pid_t pid, void *addr, size_t len) {
     pthread_mutex_lock(&pager.mutex);
 
@@ -408,11 +407,14 @@ int pager_syslog(pid_t pid, void *addr, size_t len) {
         return -1;
     }
 
+    long pagesize = sysconf(_SC_PAGESIZE);
+
     /* Verifica se endereço está dentro do espaço alocado */
     intptr_t start_offset = (intptr_t)addr - UVM_BASEADDR;
-    intptr_t end_offset = start_offset + len - 1;
+    intptr_t end_offset   = start_offset + (intptr_t)len - 1;
 
-    if (start_offset < 0 || end_offset >= proc->page_count * sysconf(_SC_PAGESIZE)) {
+    if (start_offset < 0 ||
+        end_offset >= (intptr_t)proc->page_count * pagesize) {
         pthread_mutex_unlock(&pager.mutex);
         errno = EINVAL;
         return -1;
@@ -420,35 +422,33 @@ int pager_syslog(pid_t pid, void *addr, size_t len) {
 
     /* Para cada byte, imprime em hexadecimal */
     for (size_t i = 0; i < len; i++) {
-        void *current_addr = (void *)((intptr_t)addr + i);
+        void *current_addr = (void *)((intptr_t)addr + (intptr_t)i);
         intptr_t offset = (intptr_t)current_addr - UVM_BASEADDR;
-        int page_idx = offset / sysconf(_SC_PAGESIZE);
-        int byte_in_page = offset % sysconf(_SC_PAGESIZE);
+        int page_idx    = offset / pagesize;
+        int byte_in_page = offset % pagesize;
 
         page_entry_t *page = &proc->pages[page_idx];
 
         /* Se página não está na memória, traz para memória (somente leitura) */
         if (page->state != PAGE_IN_MEMORY) {
-            /* Similar a pager_fault, mas apenas para leitura */
-
             int frame = find_free_frame();
             if (frame < 0) {
                 frame = select_victim_frame();
                 evict_page(frame);
             }
 
-            /* Carrega página */
             frame_entry_t *f = &pager.frames[frame];
-            f->free = 0;
-            f->pid = pid;
+            f->free       = 0;
+            f->pid        = pid;
             f->page_index = page_idx;
             f->referenced = 1;
 
-            page->frame = frame;
-            page->state = PAGE_IN_MEMORY;
+            page->frame      = frame;
+            page->state      = PAGE_IN_MEMORY;
             page->referenced = 1;
 
-            void *vaddr = (void *)(UVM_BASEADDR + page_idx * sysconf(_SC_PAGESIZE));
+            void *vaddr = (void *)(UVM_BASEADDR +
+                                   (intptr_t)page_idx * pagesize);
 
             if (!page->initialized) {
                 mmu_zero_fill(frame);
@@ -467,14 +467,18 @@ int pager_syslog(pid_t pid, void *addr, size_t len) {
         pager.frames[page->frame].referenced = 1;
 
         /* Lê byte da memória física e imprime */
-        unsigned char byte = pmem[page->frame * sysconf(_SC_PAGESIZE) + byte_in_page];
-        printf("%02x", byte);
+        unsigned char byte =
+            pmem[page->frame * pagesize + byte_in_page];
+        printf("%02x", (unsigned)byte);
     }
+
+    /* Se os testes reclamarem de formato, podemos ajustar o \n aqui */
     printf("\n");
 
     pthread_mutex_unlock(&pager.mutex);
     return 0;
 }
+
 
 void pager_destroy(pid_t pid) {
     pthread_mutex_lock(&pager.mutex);
