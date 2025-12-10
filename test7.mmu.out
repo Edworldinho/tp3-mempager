@@ -1,3 +1,0 @@
-pager_create pid 0
-pager_syslog pid 0 (nil)
-pager_destroy pid 0
