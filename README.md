@@ -28,17 +28,11 @@ Consultamos o DeepSeek para tirar dúvidas sobre funções específicas e utiliz
 
 ```c
 typedef enum {
-    PAGE_UNINITIALIZED,  /* Nunca acessada, sem quadro nem dados */
-    PAGE_ON_DISK,        /* Em disco, não na memória */
-    PAGE_IN_MEMORY       /* Na memória RAM */
+    PAGE_UNINITIALIZED,
+    PAGE_ON_DISK,
+    PAGE_IN_MEMORY
 } page_state_t;
 ```
-
-Modela o ciclo de vida de uma página:
-
-* **PAGE_UNINITIALIZED:** páginas recém-alocadas (zero-fill-on-demand)
-* **PAGE_ON_DISK:** páginas expulsas da RAM (swap)
-* **PAGE_IN_MEMORY:** páginas ativamente mapeadas
 
 ---
 
@@ -46,20 +40,16 @@ Modela o ciclo de vida de uma página:
 
 ```c
 typedef struct {
-    page_state_t state;      /* Estado atual */
-    int frame;               /* Quadro físico (se em memória) */
-    int disk_block;          /* Bloco de disco (swap) */
-    int prot;                /* Permissões atuais */
-    int referenced;          /* Bit de referência para LRU/clock */
-    int dirty;               /* Modificada? (write-back) */
-    int initialized;         /* Já foi zerada? */
-    int saved_on_disk;       /* Disco tem dados válidos? */
+    page_state_t state;
+    int frame;
+    int disk_block;
+    int prot;
+    int referenced;
+    int dirty;
+    int initialized;
+    int saved_on_disk;
 } page_entry_t;
 ```
-
-* Estado e localização (`state`, `frame`, `disk_block`)
-* Metadados de gerência (`referenced`, `dirty`)
-* Otimizações (`initialized`, `saved_on_disk`)
 
 ---
 
@@ -68,15 +58,11 @@ typedef struct {
 ```c
 typedef struct process_table {
     pid_t pid;
-    page_entry_t *pages;        /* Array dinâmico de páginas */
-    int page_count;             /* Tamanho do espaço virtual */
-    struct process_table *next; /* Lista encadeada */
+    page_entry_t *pages;
+    int page_count;
+    struct process_table *next;
 } process_table_t;
 ```
-
-* Array dinâmico para acesso O(1)
-* Lista encadeada para múltiplos processos
-* PID como identificador padrão
 
 ---
 
@@ -84,15 +70,12 @@ typedef struct process_table {
 
 ```c
 typedef struct {
-    int free;           /* 1 se livre, 0 se ocupado */
-    pid_t pid;          /* Processo dono */
-    int page_index;     /* Índice da página no processo */
-    int referenced;     /* Bit de referência (clock) */
+    int free;
+    pid_t pid;
+    int page_index;
+    int referenced;
 } frame_entry_t;
 ```
-
-* Tabela inversa de quadros
-* Facilita substituição de páginas e mapeamento reverso
 
 ---
 
@@ -100,52 +83,41 @@ typedef struct {
 
 ```c
 static struct {
-    int nframes;                /* Número de quadros físicos */
-    int nblocks;                /* Número de blocos de disco */
-    frame_entry_t *frames;      /* Tabela de quadros físicos */
-    int *free_blocks;           /* Bitmap de blocos livres */
-    int free_block_count;       /* Contador rápido */
-    process_table_t *processes; /* Lista de processos */
-    int clock_hand;             /* Ponteiro do algoritmo clock */
-    pthread_mutex_t mutex;      /* Sincronização */
+    int nframes;
+    int nblocks;
+    frame_entry_t *frames;
+    int *free_blocks;
+    int free_block_count;
+    process_table_t *processes;
+    int clock_hand;
+    pthread_mutex_t mutex;
 } pager;
 ```
-
-* Gerenciamento global de memória
-* Bitmap eficiente para swap
-* Algoritmo clock implementado
-* Mutex para thread safety
 
 ---
 
 ## Mecanismo de Controle de Acesso e Modificação
 
-### 1. Sistema de Permissões em Três Níveis
+### 1. Sistema de Permissões
 
 ```c
-int prot;  /* PROT_NONE, PROT_READ, ou PROT_READ | PROT_WRITE */
+int prot;  /* PROT_NONE, PROT_READ, PROT_READ | PROT_WRITE */
 ```
-
-* **PROT_NONE:** Acesso revogado
-* **PROT_READ:** Somente leitura
-* **PROT_READ | PROT_WRITE:** Leitura e escrita
 
 ---
 
 ### 2. Implementação do Controle
 
-#### A. Falta de Página (`pager_fault`)
+#### Falta de Página (`pager_fault`)
 
 ```c
 if (page->state == PAGE_IN_MEMORY) {
     if (page->prot == PROT_NONE) {
-        /* Segunda chance: reativa para leitura */
         page->prot = PROT_READ;
         mmu_chprot(pid, page_vaddr, page->prot);
     } else if (page->prot == PROT_READ) {
-        /* Upgrade para escrita */
         page->prot = PROT_READ | PROT_WRITE;
-        page->dirty = 1;  /* Marca como modificada */
+        page->dirty = 1;
         mmu_chprot(pid, page_vaddr, page->prot);
     }
 }
@@ -153,7 +125,7 @@ if (page->state == PAGE_IN_MEMORY) {
 
 ---
 
-#### B. Algoritmo Clock com Controle de Acesso
+#### Algoritmo Clock
 
 ```c
 if (page->prot != PROT_NONE) {
@@ -165,16 +137,12 @@ if (page->prot != PROT_NONE) {
 
 ---
 
-### 3. Controle de Modificação (Dirty Bit)
-
-#### Marcação
+### 3. Controle de Modificação
 
 ```c
 page->prot = PROT_READ | PROT_WRITE;
 page->dirty = 1;
 ```
-
-#### Write-back no Swap
 
 ```c
 if (page->dirty) {
@@ -190,14 +158,14 @@ if (page->dirty) {
 
 ### 4. Políticas Especiais
 
-#### Páginas para `syslog`
+#### `syslog`
 
 ```c
 mmu_resident(pid, vaddr, frame, PROT_READ);
 page->prot = PROT_READ;
 ```
 
-#### Nova Página (`load_page`)
+#### Nova Página
 
 ```c
 mmu_resident(proc->pid, vaddr, frame, PROT_READ);
@@ -206,13 +174,13 @@ page->prot = PROT_READ;
 
 ---
 
-## Vantagens do Mecanismo
+## Vantagens
 
-* Processos só escrevem onde têm permissão
-* Write-back eficiente (somente páginas sujas)
+* Proteção de acesso
+* Write-back eficiente
 * Zero-fill-on-demand
 * Segunda chance com PROT_NONE
-* `saved_on_disk` evita dados inválidos
+* `saved_on_disk` mantém consistência
 * `dirty` garante persistência
 
 ---
@@ -220,20 +188,150 @@ page->prot = PROT_READ;
 ## Fluxo Típico de Acesso
 
 ```
-1. Acesso READ → PROT_NONE ou não residente → page fault
-2. Página carregada com PROT_READ
+1. Acesso READ → page fault
+2. Carrega com PROT_READ
 3. Escrita → page fault
-4. Upgrade para PROT_WRITE, dirty = 1
-5. Algoritmo clock:
-   a. referenced=1 → PROT_NONE
-   b. referenced=0 → expulsão
-   c. dirty=1 → write-back
+4. PROT_WRITE + dirty=1
+5. Clock:
+   referenced=1 → PROT_NONE
+   referenced=0 → expulsão
+   dirty=1 → write-back
 ```
 
 ---
 
 ## Decisões de Design
 
-* Separação entre páginas virtuais, quadros físicos e processos
-* Otimizações com `saved_on_disk`, `initialized` e `free_block_count`
-* Estruturas escaláveis: lista de processos + arrays de páginas e quadros
+* Separação entre estruturas
+* Otimizações (`saved_on_disk`, `initialized`, `free_block_count`)
+* Estruturas escaláveis
+
+---
+
+# Seção de sugestões que geram Pontos Extras
+
+## 1. Melhorias de especificação
+
+### Explicar Comportamento de `pager_syslog` com Strings Cruzando Múltiplas Páginas (no doc de especificação)
+
+## Detalhamento de `pager_syslog`
+
+A função `pager_syslog` deve:
+
+1. Aceitar valores de `len` arbitrários (incluindo > PAGESIZE)
+2. Tratar strings que cruzam múltiplas páginas automaticamente
+3. Verificar se **todos os bytes** de `addr` a `addr+len-1` estão em páginas alocadas
+4. Retornar **-1 (EINVAL)** se qualquer byte estiver fora do espaço alocado
+5. Acessar cada página necessária (trazendo para memória se estiver em disco)
+
+---
+
+## 2. Melhorias na Documentação do Código
+
+### Documentação das Estruturas de Dados
+
+## Arquitetura do Sistema (adicionar essa explicação sobre esses componentes e o fluxo da página, em um info.MD)
+
+### Componentes:
+
+```
+1. **Aplicação (testX.c)**: usa uvm.h para alocar memória
+2. **UVM (uvm.c)**: gerencia sinais SIGSEGV e comunicação
+3. **MMU (mmu.c)**: servidor central, gerencia memória física
+4. **Pager (pager.c)**: implementa políticas de paginação
+```
+
+### Fluxo de Falha de Página:
+
+```
+App → SIGSEGV → uvm_segv_action → SEGV_REQ → mmu.c → pager_fault
+          ↓
+App continua ← SEGV_REP ← mmu_resident ← pager.c
+```
+
+---
+
+## 3. Identificação de Erros nas Bibliotecas
+
+### a) Race Condition em `uvm_segv_action`
+
+```c
+void uvm_segv_action(int signum, siginfo_t *si, void *context) {
+    pthread_mutex_lock(&uvm->mutex);
+    pthread_cond_wait(&uvm->cond, &uvm->mutex);
+    pthread_mutex_unlock(&uvm->mutex);
+}
+```
+
+#### Correção sugerida
+
+```c
+// Usa pthread_mutex_trylock com timeout
+void uvm_segv_action(int signum, siginfo_t *si, void *context) {
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    ts.tv_sec += 1; // timeout de 1 segundo
+
+    if (pthread_mutex_timedlock(&uvm->mutex, &ts) != 0) {
+        // Não conseguiu lock, aborta o processo
+        fprintf(stderr, "Cannot handle segfault: mutex busy\n");
+        exit(EXIT_FAILURE);
+    }
+}
+```
+
+---
+
+### b) Memory Leak em `mmu_client_destroy`
+
+```c
+void mmu_client_destroy(struct mmu_client *c) {
+    if(c->pid) {
+        pager_destroy(c->pid);
+    }
+}
+```
+
+#### Correção sugerida
+
+```c
+void mmu_client_destroy(struct mmu_client *c) {
+    mmu->sock2client[c->sock] = NULL;
+    c->running = 0;
+    close(c->sock);
+    if(c->pid) {
+        pager_destroy(c->pid);
+    }
+    free(c); // Impede um memory Leak
+}
+```
+
+---
+
+### c) Potencial Deadlock em `mmu_resident` / `mmu_nonresident`
+
+```c
+do {
+    if(recv(c->sock, &t, sizeof(t), MSG_PEEK) != sizeof(t))
+        goto out_client;
+} while(t != MMU_PROTO_REMAP_REQ); // LOOP INFINITO SE CLIENTE MORRER
+```
+
+#### Correção sugerida
+
+```c
+int attempts = 0;
+
+do {
+    if(recv(c->sock, &t, sizeof(t), MSG_PEEK) != sizeof(t))
+        goto out_client;
+
+    attempts++;
+    if (attempts > 100) { //Timeout após 100 tentativas
+        logd(LOG_ERROR, "mmu_resident: timeout waiting for REMAP_REQ\n");
+        goto out_client;
+    }
+
+    usleep(10000);
+} while(t != MMU_PROTO_REMAP_REQ);
+```
