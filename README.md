@@ -27,10 +27,11 @@ Consultamos o DeepSeek para tirar dúvidas sobre funções específicas e utiliz
 #### 1. `page_state_t` (enum)
 
 ```c
+//Modela o ciclo de vida completo de uma página:
 typedef enum {
-    PAGE_UNINITIALIZED,
-    PAGE_ON_DISK,
-    PAGE_IN_MEMORY
+    PAGE_UNINITIALIZED, //Páginas recém-alocadas (zero-fill-on-demand)
+    PAGE_ON_DISK, //Páginas expulsas da RAM (swap)
+    PAGE_IN_MEMORY //Páginas ativamente mapeadas
 } page_state_t;
 ```
 
@@ -39,6 +40,10 @@ typedef enum {
 #### 2. `page_entry_t` (struct)
 
 ```c
+/*Cada entrada contém:
+Estado e localização (state, frame, disk_block): Rastreia onde os dados estão
+Metadados de gerência (referenced, dirty): Para algoritmos de substituição
+Otimizações (initialized, saved_on_disk): Evita operações desnecessárias*/
 typedef struct {
     page_state_t state;
     int frame;
@@ -56,6 +61,9 @@ typedef struct {
 #### 3. `process_table_t` (struct)
 
 ```c
+/*Array dinâmico de páginas: Simples acesso O(1) por índice
+Lista encadeada de processos: Suporta múltiplos processos concorrentes
+PID como identificador: Compatível com sistema operacional*/
 typedef struct process_table {
     pid_t pid;
     page_entry_t *pages;
@@ -69,6 +77,8 @@ typedef struct process_table {
 #### 4. `frame_entry_t` (struct)
 
 ```c
+/*Localização reversa: Dado um quadro, encontra a página correspondente
+Gerenciamento de memória física: Alocação/desalocação de quadros*/
 typedef struct {
     int free;
     pid_t pid;
@@ -82,6 +92,10 @@ typedef struct {
 #### 5. Estrutura Global `pager`
 
 ```c
+/*Configuração flexível: Parâmetros definidos na inicialização
+Bitmap para blocos de disco: Eficiente para gerenciar espaço swap
+Algoritmo clock implementado: Substituição de páginas com segunda chance
+Mutex para thread-safety: Operações atômicas em ambiente concorrente*/
 static struct {
     int nframes;
     int nblocks;
